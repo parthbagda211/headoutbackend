@@ -6,17 +6,42 @@ import uuid
 import random
 import json
 import redis
+import os
+from dotenv import load_dotenv
 
 app = Flask(__name__)
 CORS(app)
 
 # --- PostgreSQL Setup ---
-app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:12345@localhost/travel'
+load_dotenv('.env')
+
+USER_NAME = os.getenv('POSTGRES_USER')
+PASSWORD = os.getenv('POSTGRES_PASSWORD')
+HOST = os.getenv('POSTGRES_HOST')
+PORT = os.getenv('POSTGRES_PORT', '5432')  # Default to 5432 if not set
+DATABASE = os.getenv('POSTGRES_DB')
+
+# Ensure all required environment variables are set
+if not all([USER_NAME, PASSWORD, HOST, DATABASE]):
+    raise EnvironmentError("One or more required PostgreSQL environment variables are missing: "
+                           "POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_HOST, POSTGRES_DB")
+
+
+app.config['SQLALCHEMY_DATABASE_URI'] = f'postgresql://{USER_NAME}:{PASSWORD}@{HOST}:{PORT}/{DATABASE}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
 db = SQLAlchemy(app)
 
 # --- Redis Setup ---
-r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+
+REDIS_HOST = os.getenv('REDIS_HOST')
+REDIS_PORT = os.getenv('REDIS_PORT')
+REDIS_PASSWORD = os.getenv('REDIS_PASSWORD')
+
+if REDIS_PASSWORD:
+    r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, password=REDIS_PASSWORD, decode_responses=True)
+else:
+  r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
 
 # --- Models ---
 
