@@ -56,16 +56,39 @@ with open('data/final-travel-data.json') as f:
 
 # --- Routes ---
 
+
 @app.route('/api/user', methods=['POST'])
-def register_user():
+def create_or_register_user():
     data = request.get_json()
     username = data.get('username')
+    invite_id = data.get('invite_id')
+
+    if not username:
+        return jsonify({'error': 'Username is required'}), 400
+
+    # Try to find existing user
     user = User.query.filter_by(username=username).first()
+
     if not user:
+        # Create new user if not found
         user = User(username=username)
         db.session.add(user)
-        db.session.commit()
-    return jsonify({'username': user.username, 'score': user.score, 'user_id': user.id})
+        db.session.flush()  # Get user.id without committing yet
+
+        # If invite ID provided, update the invite
+        if invite_id:
+            invite = Invite.query.filter_by(id=invite_id).first()
+            if invite:
+                invite.invitee_username = username
+
+    db.session.commit()
+
+    return jsonify({
+        'user_id': user.id,
+        'username': user.username,
+        'score': user.score
+    }), 201
+
 
 @app.route('/api/user/<username>', methods=['GET'])
 def get_user(username):
