@@ -162,13 +162,26 @@ def create_invite():
     db.session.commit()
     return jsonify({'invite_id': invite.id})
 
+from flask import request
+
 @app.route('/api/invite/<invite_id>', methods=['GET'])
 def get_invite(invite_id):
-    invite = Invite.query.get(invite_id)
+    invite = Invite.query.filter_by(id=invite_id).first()
     if not invite:
-        return jsonify({'error': 'Invalid invite ID'}), 404
+        return jsonify({'error': 'Invite not found'}), 404
+
+    # If invitee_username is empty, fill it with the IP address
+    if not invite.invitee_username:
+        ip_address = request.headers.get('X-Forwarded-For', request.remote_addr)
+        invite.invitee_username = ip_address
+        db.session.commit()
+
     inviter = User.query.get(invite.inviter_id)
-    return jsonify({'inviter_username': inviter.username, 'score': inviter.score})
+
+    return jsonify({
+        'inviter_username': inviter.username if inviter else None,
+        'score': inviter.score if inviter else None
+    })
 
 
 @app.route('/api/game/scores/<string:user_id>', methods=['GET'])
