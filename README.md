@@ -26,6 +26,24 @@ cd headoutbackend
 python3 -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+
+to run the application:
+python3 app.py
+
+
+# PostgreSQL Database
+POSTGRES_USER=your_db_user
+POSTGRES_PASSWORD=your_db_password
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=your_db_name
+
+# Flask config
+FLASK_APP=app.py
+FLASK_ENV=development
+PORT=5000
+```
+
 ```
  
 ---
