@@ -32,23 +32,17 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
 
-# --- Redis Setup ---
-
-REDIS_HOST = os.getenv('REDIS_HOST')
-REDIS_PORT = os.getenv('REDIS_PORT')
-REDIS_PASSWORD = os.getenv('REDIS_PASSWORD')
-
-if REDIS_PASSWORD:
-    r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, password=REDIS_PASSWORD, decode_responses=True)
-else:
-  r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
-
-# --- Models ---
-
 class User(db.Model):
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     username = db.Column(db.String(50), unique=True, nullable=False)
     score = db.Column(db.Integer, default=0)
+
+class GameSession(db.Model):
+    id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = db.Column(db.String, db.ForeignKey('user.id'))
+    correct = db.Column(db.Boolean)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    answer_id = db.Column(db.Integer) # This is the index of the correct destination
 
 class Invite(db.Model):
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -97,7 +91,7 @@ def get_question():
 def check_guess():
     data = request.get_json()
     selected = data.get('selected')
-    answer = data.get('answer')
+    answer = data.get('answer')  # This is the index of the correct destination
     user_id = data.get('user_id')
 
     destination = DESTINATIONS[answer]
@@ -105,10 +99,11 @@ def check_guess():
     fun_fact = random.choice(destination['fun_fact'])
 
     user = User.query.get(user_id)
-    session_key = f"user:{user_id}:answered:{answer}"
+    existing_session = GameSession.query.filter_by(user_id=user_id, answer_id=answer).first()
 
-    if r.exists(session_key):
-        was_incorrect = r.get(session_key) == 'false'
+    # If already answered this question
+    if existing_session:
+        was_incorrect = not existing_session.correct
         return jsonify({
             'correct': correct,
             'fun_fact': fun_fact,
@@ -117,9 +112,11 @@ def check_guess():
             'extra_clue': destination['clues'][1] if was_incorrect and len(destination['clues']) > 1 else None
         })
 
-    # Save session to Redis
-    r.set(session_key, str(correct).lower(),ex=1800)  # 'true' or 'false'
+    # Save game session
+    session = GameSession(user_id=user_id, correct=correct, answer_id=answer)
+    db.session.add(session)
 
+    # Update score only if correct and not previously answered
     if correct:
         user.score += 1
     db.session.commit()
@@ -131,6 +128,7 @@ def check_guess():
         'already_answered': False,
         'extra_clue': destination['clues'][1] if not correct and len(destination['clues']) > 1 else None
     })
+
 
 @app.route('/api/invite', methods=['POST'])
 def create_invite():
@@ -149,23 +147,23 @@ def get_invite(invite_id):
     inviter = User.query.get(invite.inviter_id)
     return jsonify({'inviter_username': inviter.username, 'score': inviter.score})
 
+
 @app.route('/api/game/scores/<string:user_id>', methods=['GET'])
 def get_scores(user_id):
+    # Get the total score from the User model
     user = User.query.get(user_id)
+    
     if not user:
         return jsonify({'error': 'User not found'}), 404
 
-    # Count correct answers in current Redis session
-    pattern = f"user:{user_id}:answered:*"
-    correct_count = 0
-    for key in r.scan_iter(match=pattern):
-        if r.get(key) == 'true':
-            correct_count += 1
+    # Calculate the current session score from the GameSession model
+    current_score = GameSession.query.filter_by(user_id=user_id, correct=True).count()
 
     return jsonify({
-        'total_score': user.score,
-        'current_score': correct_count
+        'total_score': user.score,  # Total score stored in User model
+        'current_score': current_score  # Score for the current session (correct answers)
     })
+
 
 # --- Init DB ---
 with app.app_context():
