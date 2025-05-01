@@ -77,7 +77,7 @@ def get_user(username):
 @app.route('/api/game/question', methods=['GET'])
 def get_question():
     destination = random.choice(DESTINATIONS)
-    clues = random.sample(destination['clues'], k=1)
+    clues = random.sample(destination['clues'], k=2)
     options = random.sample([d['city'] for d in DESTINATIONS if d != destination], k=3)
     options.append(destination['city'])
     random.shuffle(options)
