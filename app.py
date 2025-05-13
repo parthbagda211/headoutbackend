@@ -30,6 +30,13 @@ if not all([USER_NAME, PASSWORD, HOST, DATABASE]):
 app.config['SQLALCHEMY_DATABASE_URI'] = f'postgresql://{USER_NAME}:{PASSWORD}@{HOST}:{PORT}/{DATABASE}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
+# --- Redis Setup ---
+REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
+REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
+REDIS_DB = int(os.getenv('REDIS_DB', 0))
+
+redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True)
+
 db = SQLAlchemy(app)
 
 class User(db.Model):
@@ -114,43 +121,63 @@ def get_question():
 def check_guess():
     data = request.get_json()
     selected = data.get('selected')
-    answer = data.get('answer')  # This is the index of the correct destination
+    answer = data.get('answer')  # index of correct destination
     user_id = data.get('user_id')
 
     destination = DESTINATIONS[answer]
     correct = selected == destination['city']
     fun_fact = random.choice(destination['fun_fact'])
 
-    user = User.query.get(user_id)
-    existing_session = GameSession.query.filter_by(user_id=user_id, answer_id=answer).first()
-
-    # If already answered this question
-    if existing_session:
-        was_incorrect = not existing_session.correct
+    # Use Redis key to track if user already answered this question
+    redis_key = f"session:{user_id}:{answer}"
+    if redis_client.exists(redis_key):
+        was_correct = redis_client.hget(redis_key, "correct") == 'True'
         return jsonify({
             'correct': correct,
             'fun_fact': fun_fact,
-            'updated_score': user.score,
+            'updated_score': User.query.get(user_id).score,
             'already_answered': True,
-            'extra_clue': destination['clues'][1] if was_incorrect and len(destination['clues']) > 1 else None
+            'extra_clue': destination['clues'][1] if not was_correct else None
         })
 
-    # Save game session
+    # Save to Redis (expire in 1 hour, optional)
+    redis_client.hset(redis_key, mapping={"correct": str(correct), "timestamp": datetime.utcnow().isoformat()})
+    redis_client.expire(redis_key, 3600)  # Expires in 1 hour
+
+    # Save to PostgreSQL
+    user = User.query.get(user_id)
     session = GameSession(user_id=user_id, correct=correct, answer_id=answer)
     db.session.add(session)
+    
 
-    # Update score only if correct and not previously answered
     if correct:
         user.score += 1
-    db.session.commit()
+    # Store the updated score in Redis with a 20-minute expiration
+    redis_client.setex(f"user:{user_id}:score", 1200, user.score)
 
+    # Schedule a task to update the database after 20 minutes
+    redis_key_db_update = f"user:{user_id}:db_update"
+    if not redis_client.exists(redis_key_db_update):
+        redis_client.setex(redis_key_db_update, 1200, "pending")
+
+        def update_db_score():
+            with app.app_context():
+                user = User.query.get(user_id)
+                if user:
+                    cached_score = redis_client.get(f"user:{user_id}:score")
+                    if cached_score is not None:
+                        user.score = int(cached_score)
+                        db.session.commit()
+
+       
     return jsonify({
         'correct': correct,
         'fun_fact': fun_fact,
         'updated_score': user.score,
         'already_answered': False,
-        'extra_clue': destination['clues'][1] if not correct and len(destination['clues']) > 1 else None
+        'extra_clue': destination['clues'][1] if not correct else None
     })
+
 
 
 @app.route('/api/invite', methods=['POST'])
@@ -173,20 +200,26 @@ def get_invite(invite_id):
 
 @app.route('/api/game/scores/<string:user_id>', methods=['GET'])
 def get_scores(user_id):
-    # Get the total score from the User model
-    user = User.query.get(user_id)
-    
-    if not user:
-        return jsonify({'error': 'User not found'}), 404
+    # First, try to fetch the score from Redis
+    cached_score = redis_client.get(f"user:{user_id}:score")
+    if cached_score is not None:
+        cached_score = int(cached_score)
+    else:
+        # If not found in Redis, fetch from the database
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        cached_score = user.score
+        # Cache the score in Redis for future requests
+        redis_client.set(f"user:{user_id}:score", cached_score)
 
     # Calculate the current session score from the GameSession model
     current_score = GameSession.query.filter_by(user_id=user_id, correct=True).count()
 
     return jsonify({
-        'total_score': user.score,  # Total score stored in User model
+        'total_score': cached_score,  # Total score (cached or fetched from DB)
         'current_score': current_score  # Score for the current session (correct answers)
     })
-
 
 # --- Init DB ---
 with app.app_context():
@@ -194,5 +227,5 @@ with app.app_context():
 
 # --- Run Server ---
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 5050))
     app.run(debug=True, host='0.0.0.0', port=port)
