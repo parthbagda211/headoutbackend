@@ -8,9 +8,14 @@ import json
 import redis
 import os
 from dotenv import load_dotenv
+from flask_socketio import SocketIO, emit
+import eventlet
 
 app = Flask(__name__)
 CORS(app, resources={r"*": {"origins": "*"}})
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+eventlet.monkey_patch()
 
 # --- PostgreSQL Setup ---
 load_dotenv('.env')
@@ -25,7 +30,6 @@ DATABASE = os.getenv('POSTGRES_DB')
 if not all([USER_NAME, PASSWORD, HOST, DATABASE]):
     raise EnvironmentError("One or more required PostgreSQL environment variables are missing: "
                            "POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_HOST, POSTGRES_DB")
-
 
 app.config['SQLALCHEMY_DATABASE_URI'] = f'postgresql://{USER_NAME}:{PASSWORD}@{HOST}:{PORT}/{DATABASE}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -55,8 +59,6 @@ with open('data/final-travel-data.json') as f:
     DESTINATIONS = json.load(f)
 
 # --- Routes ---
-
-
 @app.route('/api/user', methods=['POST'])
 def create_or_register_user():
     data = request.get_json()
@@ -88,7 +90,6 @@ def create_or_register_user():
         'username': user.username,
         'score': user.score
     }), 201
-
 
 @app.route('/api/user/<username>', methods=['GET'])
 def get_user(username):
@@ -152,7 +153,6 @@ def check_guess():
         'extra_clue': destination['clues'][1] if not correct and len(destination['clues']) > 1 else None
     })
 
-
 @app.route('/api/invite', methods=['POST'])
 def create_invite():
     data = request.get_json()
@@ -170,23 +170,26 @@ def get_invite(invite_id):
     inviter = User.query.get(invite.inviter_id)
     return jsonify({'inviter_username': inviter.username, 'score': inviter.score})
 
-
 @app.route('/api/game/scores/<string:user_id>', methods=['GET'])
 def get_scores(user_id):
-    # Get the total score from the User model
     user = User.query.get(user_id)
-    
+
     if not user:
         return jsonify({'error': 'User not found'}), 404
 
-    # Calculate the current session score from the GameSession model
     current_score = GameSession.query.filter_by(user_id=user_id, correct=True).count()
 
-    return jsonify({
-        'total_score': user.score,  # Total score stored in User model
-        'current_score': current_score  # Score for the current session (correct answers)
+    # Emit score update via WebSocket
+    socketio.emit('score_update', {
+        'user_id': user.id,
+        'new_score': user.score,
+        'session_score': current_score
     })
 
+    return jsonify({
+        'total_score': user.score,
+        'current_score': current_score
+    })
 
 # --- Init DB ---
 with app.app_context():
@@ -194,5 +197,12 @@ with app.app_context():
 
 # --- Run Server ---
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(debug=True, host='0.0.0.0', port=port)
+    # Run the Flask app on port 5050
+    from gevent.pywsgi import WSGIServer
+    from geventwebsocket.handler import WebSocketHandler
+
+    http_server = WSGIServer(('0.0.0.0', 5050), app, handler_class=WebSocketHandler)
+    http_server.start()
+
+    # Run the SocketIO server on port 9000
+    socketio.run(app, host='0.0.0.0', port=9000, use_reloader=False)
